@@ -3,6 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import cv2
+import numpy as np
+
+import scripts.record_platform_run as record_platform_run
+import scripts.validate_outputs as validate_outputs
 from difftactile.utils import platform_recording as pr
 
 
@@ -14,6 +19,14 @@ class PlatformRecordingTests(unittest.TestCase):
         self.assertEqual(config.num_total_steps, 300)
         self.assertEqual(config.num_opt_steps, 10)
         self.assertEqual(config.min_duration_seconds, 600)
+
+    def test_demo_profile_expands_to_smoother_short_demo_steps(self):
+        config = pr.resolve_profile("box_open", "demo", [])
+        self.assertEqual(config.task, "box_open")
+        self.assertEqual(config.num_sub_steps, 8)
+        self.assertEqual(config.num_total_steps, 90)
+        self.assertEqual(config.num_opt_steps, 2)
+        self.assertEqual(config.min_duration_seconds, 60)
 
     def test_explicit_passthrough_overrides_profile_steps(self):
         config = pr.resolve_profile(
@@ -38,6 +51,7 @@ class PlatformRecordingTests(unittest.TestCase):
             height=1080,
             fps=30,
             loglevel="info",
+            preset="ultrafast",
         )
         self.assertEqual(cmd[:5], ["ffmpeg", "-y", "-hide_banner", "-loglevel", "info"])
         self.assertIn("-f", cmd)
@@ -46,7 +60,27 @@ class PlatformRecordingTests(unittest.TestCase):
         self.assertIn("1920x1080", cmd)
         self.assertIn(":101.0", cmd)
         self.assertIn("libx264", cmd)
+        self.assertIn("ultrafast", cmd)
         self.assertIn("yuv420p", cmd)
+
+    def test_record_platform_run_accepts_explicit_cuda_device(self):
+        args = record_platform_run.parse_args(
+            [
+                "--task",
+                "box_open",
+                "--profile",
+                "demo",
+                "--cuda_device",
+                "2",
+                "--pyopengl_platform",
+                "egl",
+                "--",
+                "--use_state",
+            ]
+        )
+        self.assertEqual(args.cuda_device, "2")
+        self.assertEqual(args.pyopengl_platform, "egl")
+        self.assertEqual(args.passthrough, ["--use_state"])
 
     def test_existing_display_is_reused_when_requested(self):
         with pr.display_context(
@@ -76,6 +110,79 @@ class PlatformRecordingTests(unittest.TestCase):
                 run.mirror_video,
                 Path(tmp) / "videos" / "unit_platform_box_open_platform.mp4",
             )
+
+    def test_motion_score_detects_changed_frames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = Path(tmp) / "moving.mp4"
+            writer = cv2.VideoWriter(
+                str(video_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                10,
+                (64, 48),
+            )
+            for idx in range(12):
+                frame = np.zeros((48, 64, 3), dtype=np.uint8)
+                frame[:, idx : idx + 10, 1] = 255
+                writer.write(frame)
+            writer.release()
+
+            result = pr.video_motion_score(video_path, sample_count=8)
+            self.assertGreater(result["changed_fraction"], 0.5)
+            self.assertGreater(result["mean_absdiff"], 1.0)
+
+    def test_motion_score_rejects_static_frames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = Path(tmp) / "static.mp4"
+            writer = cv2.VideoWriter(
+                str(video_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                10,
+                (64, 48),
+            )
+            frame = np.zeros((48, 64, 3), dtype=np.uint8)
+            frame[:, :, 2] = 128
+            for _ in range(12):
+                writer.write(frame)
+            writer.release()
+
+            result = pr.video_motion_score(video_path, sample_count=8)
+            self.assertEqual(result["changed_fraction"], 0.0)
+            self.assertLess(result["mean_absdiff"], 1.0)
+
+    def test_motion_passes_on_fraction_or_mean_difference(self):
+        self.assertTrue(
+            pr.video_motion_passes(
+                {"changed_fraction": 0.08, "mean_absdiff": 0.86},
+                changed_fraction_threshold=0.15,
+                mean_absdiff_threshold=0.5,
+            )
+        )
+        self.assertFalse(
+            pr.video_motion_passes(
+                {"changed_fraction": 0.0, "mean_absdiff": 0.01},
+                changed_fraction_threshold=0.15,
+                mean_absdiff_threshold=0.5,
+            )
+        )
+
+    def test_validate_platform_video_includes_motion_score(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = Path(tmp) / "moving.mp4"
+            writer = cv2.VideoWriter(
+                str(video_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                10,
+                (64, 48),
+            )
+            for idx in range(12):
+                frame = np.zeros((48, 64, 3), dtype=np.uint8)
+                frame[:, idx : idx + 10, 0] = 255
+                writer.write(frame)
+            writer.release()
+
+            result = validate_outputs.validate_platform_video(video_path)
+            self.assertIn("motion", result)
+            self.assertGreater(result["motion"]["changed_fraction"], 0.5)
 
     def test_task_env_keeps_display_and_removes_headless_flags(self):
         env = pr.task_environment(

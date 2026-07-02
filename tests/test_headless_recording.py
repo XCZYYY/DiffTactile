@@ -16,10 +16,10 @@ class HeadlessRecordingTests(unittest.TestCase):
             self.assertEqual(run.task_name, "box_open")
             self.assertEqual(run.run_id, "unit_run")
             self.assertTrue(run.root.is_dir())
-            self.assertTrue(run.videos.is_dir())
             self.assertTrue(run.plots.is_dir())
             self.assertTrue(run.trajectories.is_dir())
-            self.assertTrue(run.frames.is_dir())
+            self.assertFalse(run.videos.exists())
+            self.assertFalse(run.frames.exists())
             self.assertTrue((Path(tmp) / "videos").is_dir())
 
             metadata_path = hr.save_json(run.root / "metadata.json", {"task": "box_open"})

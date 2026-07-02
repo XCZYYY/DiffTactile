@@ -720,6 +720,8 @@ def main():
     num_sub_steps = run_config.num_sub_steps
     num_total_steps = run_config.num_total_steps
     num_opt_steps = run_config.num_opt_steps
+    gui_refresh_stride = args.gui_refresh_stride if args.gui_refresh_stride and args.gui_refresh_stride > 0 else None
+    use_3d_window = not Off_screen and not args.disable_3d_window
     record_video = False
     run_layout = make_run_dir(args.output_root, "cable_straightening", args.run_name)
     save_json(run_layout.root / "metadata.json", {
@@ -733,6 +735,8 @@ def main():
         "num_total_steps": num_total_steps,
         "num_opt_steps": num_opt_steps,
         "record_stride": run_config.record_stride,
+        "gui_refresh_stride": gui_refresh_stride,
+        "disable_3d_window": args.disable_3d_window,
     })
     video_recorder = None
     video_frames = 0
@@ -744,8 +748,7 @@ def main():
             frame_size=(960, 720),
             mirror_paths=[run_layout.mirror_videos / f"{run_layout.run_id}_cable_straightening.mp4"],
         )
-    if not Off_screen:
-
+    if use_3d_window:
         window = ti.ui.Window("Rope manipulation" , (512, 512))
         canvas = window.get_canvas()
         canvas.set_background_color((1, 1, 1))
@@ -756,12 +759,49 @@ def main():
         camera.up(0, 1, 0)
         camera.lookat(0.0, 0.1, 0.0)
         camera.fov(75)
+    if not Off_screen:
         gui1 = ti.GUI("Contact Viz")
         gui2 = ti.GUI("Force Map 1")
         gui3 = ti.GUI("Deformation Map 1")
 
     dt = 5e-4
     contact_model = Contact(use_tactile=USE_TACTILE, use_state=USE_STATE, dt=dt, total_steps = num_total_steps, sub_steps = num_sub_steps)
+
+    def render_gui(frame_idx):
+        if Off_screen:
+            return
+        frame_idx = max(0, min(int(frame_idx), num_sub_steps - 2))
+        viz_scale = 0.2
+        viz_offset = [0.5, 0.2]
+        contact_model.gripper.fem_sensor1.extract_markers(frame_idx)
+        init_2d = contact_model.gripper.fem_sensor1.virtual_markers.to_numpy()
+        marker_2d = contact_model.gripper.fem_sensor1.predict_markers.to_numpy()
+        contact_model.draw_markers(init_2d, marker_2d, gui2)
+        contact_model.draw_perspective(frame_idx)
+        gui1.circles(viz_scale * contact_model.draw_pos.to_numpy() + viz_offset, radius=15, color=0x039dfc)
+        gui1.circles(viz_scale * contact_model.draw_pos1.to_numpy() + viz_offset, radius=2, color=0xe6c949)
+        gui1.circles(viz_scale * contact_model.draw_pos2.to_numpy() + viz_offset, radius=2, color=0xf542a1)
+        contact_model.draw_triangles(contact_model.gripper.fem_sensor1, gui3, frame_idx, 0, 90, viz_scale, viz_offset)
+        gui1.show()
+        gui2.show()
+        gui3.show()
+
+        if use_3d_window:
+            camera.track_user_inputs(window, movement_speed=0.2, hold_key=ti.ui.RMB)
+            scene.set_camera(camera)
+            scene.ambient_light((0.8, 0.8, 0.8))
+            scene.point_light(pos=(0.5, 1.5, 1.5), color=(1, 1, 1))
+            contact_model.draw_3d_scene(frame_idx)
+            contact_model.scale_mesh_visualize()
+            scene.particles(contact_model.draw_pos_3d, color = (0.68, 0.26, 0.19), radius = contact_model.p_rad/contact_model.view_scale)
+            scene.particles(contact_model.draw_fem1_3d, per_vertex_color = contact_model.color_fem1_3d, radius = 0.008)
+            scene.particles(contact_model.draw_fem2_3d, per_vertex_color = contact_model.color_fem2_3d, radius = 0.01)
+            scene.mesh(contact_model.gripper.gripper_base.vis_ti_vertices, contact_model.gripper.gripper_base.vis_ti_faces, contact_model.gripper.gripper_base.vis_ti_normals)
+            scene.mesh(contact_model.gripper.gripper_finger1.vis_ti_vertices, contact_model.gripper.gripper_finger1.vis_ti_faces, contact_model.gripper.gripper_finger1.vis_ti_normals)
+            scene.mesh(contact_model.gripper.gripper_finger2.vis_ti_vertices, contact_model.gripper.gripper_finger2.vis_ti_faces, contact_model.gripper.gripper_finger2.vis_ti_normals)
+            scene.lines(contact_model.draw_tableline, color = (0.28, 0.68, 0.99), width = 2.0)
+            canvas.scene(scene)
+            window.show()
 
     contact_model.draw_table()
     contact_model.init_control_parameters()
@@ -789,6 +829,8 @@ def main():
             contact_model.reset()
             for ss in range(num_sub_steps-1):
                 contact_model.update(ss)
+                if gui_refresh_stride and ss % gui_refresh_stride == 0:
+                    render_gui(ss)
             contact_model.memory_to_cache(ts)
             print("# FP Iter ", ts)
             form_loss = contact_model.loss[None]
@@ -823,42 +865,7 @@ def main():
                 video_recorder.write_frame(frame)
                 video_frames += 1
 
-            ## visualization
-            viz_scale = 0.2
-            viz_offset = [0.5, 0.2]
-
-            if not Off_screen:
-                contact_model.gripper.fem_sensor1.extract_markers(0)
-
-                init_2d = contact_model.gripper.fem_sensor1.virtual_markers.to_numpy()
-                marker_2d = contact_model.gripper.fem_sensor1.predict_markers.to_numpy()
-                contact_model.draw_markers(init_2d, marker_2d, gui2)
-                contact_model.draw_perspective(0)
-                gui1.circles(viz_scale * contact_model.draw_pos.to_numpy() + viz_offset, radius=15, color=0x039dfc)
-                gui1.circles(viz_scale * contact_model.draw_pos1.to_numpy() + viz_offset, radius=2, color=0xe6c949)
-                gui1.circles(viz_scale * contact_model.draw_pos2.to_numpy() + viz_offset, radius=2, color=0xf542a1)
-                contact_model.draw_triangles(contact_model.gripper.fem_sensor1, gui3, 0, 0, 90, viz_scale, viz_offset)
-
-                gui1.show()
-                gui2.show()
-                gui3.show()
-
-                camera.track_user_inputs(window, movement_speed=0.2, hold_key=ti.ui.RMB)
-                scene.set_camera(camera)
-                scene.ambient_light((0.8, 0.8, 0.8))
-                scene.point_light(pos=(0.5, 1.5, 1.5), color=(1, 1, 1))
-
-                contact_model.draw_3d_scene(0)
-                contact_model.scale_mesh_visualize()
-                scene.particles(contact_model.draw_pos_3d, color = (0.68, 0.26, 0.19), radius = contact_model.p_rad/contact_model.view_scale)
-                scene.particles(contact_model.draw_fem1_3d, per_vertex_color = contact_model.color_fem1_3d, radius = 0.008)
-                scene.particles(contact_model.draw_fem2_3d, per_vertex_color = contact_model.color_fem2_3d, radius = 0.01)
-                scene.mesh(contact_model.gripper.gripper_base.vis_ti_vertices, contact_model.gripper.gripper_base.vis_ti_faces, contact_model.gripper.gripper_base.vis_ti_normals)
-                scene.mesh(contact_model.gripper.gripper_finger1.vis_ti_vertices, contact_model.gripper.gripper_finger1.vis_ti_faces, contact_model.gripper.gripper_finger1.vis_ti_normals)
-                scene.mesh(contact_model.gripper.gripper_finger2.vis_ti_vertices, contact_model.gripper.gripper_finger2.vis_ti_faces, contact_model.gripper.gripper_finger2.vis_ti_normals)
-                scene.lines(contact_model.draw_tableline, color = (0.28, 0.68, 0.99), width = 2.0)
-                canvas.scene(scene)
-                window.show()
+            render_gui(num_sub_steps - 2)
 
         print("Begin backward")
 
@@ -934,14 +941,6 @@ def main():
         losses.append(loss_frame)
         print("# Iter ", opts, "Opt step loss: ", loss_frame)
 
-
-        legacy_dir = f"lr_cable_manipulation_{args.use_state}_tactile_{args.use_tactile}"
-        if not os.path.exists(legacy_dir):
-            os.mkdir(legacy_dir)
-
-        if not os.path.exists(f"results"):
-            os.mkdir(f"results")
-
         if opts %5 == 0 or opts == num_opt_steps-1:
             plt.figure()
             plt.title("Trajectory Optimization")
@@ -950,15 +949,11 @@ def main():
             plt.plot(losses)
             plot_name = f"cable_manipulation_{args.use_state}_tactile_{args.use_tactile}_{opts}.png"
             plt.savefig(run_layout.plots / plot_name)
-            plt.savefig(os.path.join(legacy_dir, plot_name))
             plt.close()
             np.save(run_layout.trajectories / f"control_p_gripper_{opts}.npy", contact_model.p_gripper.to_numpy())
             np.save(run_layout.trajectories / f"control_o_gripper_{opts}.npy", contact_model.o_gripper.to_numpy())
             np.save(run_layout.trajectories / f"control_w_gripper_{opts}.npy", contact_model.w_gripper.to_numpy())
             np.save(run_layout.trajectories / f"losses_{opts}.npy", np.array(losses))
-            np.save(os.path.join(legacy_dir, f"control_p_gripper_{opts}.npy"), contact_model.p_gripper.to_numpy())
-            np.save(os.path.join(legacy_dir, f"control_o_gripper_{opts}.npy"), contact_model.o_gripper.to_numpy())
-            np.save(os.path.join(legacy_dir, f"control_w_gripper_{opts}.npy"), contact_model.w_gripper.to_numpy())
     if video_recorder is not None and video_recorder.frames_written:
         video_path = video_recorder.close()
         print("Video saved:", video_path)
@@ -981,6 +976,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_sub_steps", type=int, default=None)
     parser.add_argument("--num_total_steps", type=int, default=None)
     parser.add_argument("--num_opt_steps", type=int, default=None)
+    parser.add_argument("--gui_refresh_stride", type=int, default=None)
+    parser.add_argument("--disable_3d_window", action="store_true")
 
     args = parser.parse_args()
     USE_STATE = args.use_state

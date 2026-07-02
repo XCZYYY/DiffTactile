@@ -23,9 +23,11 @@ TASK_SCRIPTS = {
 }
 
 PROFILE_STEPS = {
-    "smoke": (10, 20, 1, 0),
-    "long": (20, 300, 10, 600),
-    "long_extended": (20, 600, 20, 600),
+    "smoke": (10, 20, 1, 0, None),
+    "demo": (8, 90, 2, 60, 2),
+    "demo_retry": (6, 120, 2, 60, 1),
+    "long": (20, 300, 10, 600, None),
+    "long_extended": (20, 600, 20, 600, None),
 }
 
 FORBIDDEN_TASK_FLAGS = {"--headless", "--record_video"}
@@ -40,6 +42,7 @@ class TaskProfile:
     num_total_steps: int
     num_opt_steps: int
     min_duration_seconds: int
+    gui_refresh_stride: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -67,7 +70,7 @@ def resolve_profile(task: str, profile: str, passthrough_args: Sequence[str]) ->
         raise ValueError(f"Unsupported task: {task}")
     if profile not in PROFILE_STEPS:
         raise ValueError(f"Unsupported profile: {profile}")
-    sub_steps, total_steps, opt_steps, min_duration = PROFILE_STEPS[profile]
+    sub_steps, total_steps, opt_steps, min_duration, gui_refresh_stride = PROFILE_STEPS[profile]
     return TaskProfile(
         task=task,
         profile=profile,
@@ -75,6 +78,9 @@ def resolve_profile(task: str, profile: str, passthrough_args: Sequence[str]) ->
         num_total_steps=_arg_int(passthrough_args, "--num_total_steps", total_steps),
         num_opt_steps=_arg_int(passthrough_args, "--num_opt_steps", opt_steps),
         min_duration_seconds=min_duration,
+        gui_refresh_stride=_arg_int(passthrough_args, "--gui_refresh_stride", gui_refresh_stride)
+        if gui_refresh_stride is not None
+        else None,
     )
 
 
@@ -100,6 +106,8 @@ def task_passthrough_args(config: TaskProfile, extra_args: Sequence[str]) -> Lis
     ]:
         if not _has_arg(args, name):
             args = [name, str(value)] + args
+    if config.gui_refresh_stride is not None and not _has_arg(args, "--gui_refresh_stride"):
+        args = ["--gui_refresh_stride", str(config.gui_refresh_stride)] + args
     return args
 
 
@@ -160,6 +168,7 @@ def build_ffmpeg_command(
     height: int = 1080,
     fps: int = 30,
     loglevel: str = "info",
+    preset: str = "ultrafast",
 ) -> List[str]:
     return [
         "ffmpeg",
@@ -179,7 +188,7 @@ def build_ffmpeg_command(
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        preset,
         "-pix_fmt",
         "yuv420p",
         str(output_path),
@@ -241,12 +250,16 @@ def task_environment(
     base_env: Mapping[str, str],
     display: str,
     cuda_visible_devices: Optional[str] = None,
+    pyopengl_platform: Optional[str] = None,
 ) -> dict:
     env = dict(base_env)
     env["DISPLAY"] = display
     env["PYTHONUNBUFFERED"] = "1"
     env.pop("DIFFTACTILE_HEADLESS", None)
-    env.pop("PYOPENGL_PLATFORM", None)
+    if pyopengl_platform:
+        env["PYOPENGL_PLATFORM"] = pyopengl_platform
+    else:
+        env.pop("PYOPENGL_PLATFORM", None)
     if cuda_visible_devices is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
     return env
@@ -387,6 +400,65 @@ def video_is_readable_and_nonblank(path: Path, min_size_bytes: int = 1000) -> bo
         variances.append(float(np.var(frame)))
     cap.release()
     return bool(variances) and max(variances) > 1.0
+
+
+def video_motion_score(
+    path: Path,
+    sample_count: int = 24,
+    diff_threshold: float = 1.0,
+) -> dict:
+    if not path.exists() or path.stat().st_size <= 1000:
+        return {
+            "path": str(path),
+            "opened": False,
+            "frames_sampled": 0,
+            "changed_fraction": 0.0,
+            "mean_absdiff": 0.0,
+        }
+    cap = cv2.VideoCapture(str(path))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if not cap.isOpened() or frame_count <= 1:
+        cap.release()
+        return {
+            "path": str(path),
+            "opened": False,
+            "frames_sampled": 0,
+            "changed_fraction": 0.0,
+            "mean_absdiff": 0.0,
+        }
+
+    indices = np.linspace(0, frame_count - 1, num=min(sample_count, frame_count), dtype=int)
+    frames = []
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frames.append(gray)
+    cap.release()
+
+    diffs = []
+    for prev, cur in zip(frames, frames[1:]):
+        diffs.append(float(np.mean(cv2.absdiff(prev, cur))))
+    changed = [value for value in diffs if value > diff_threshold]
+    return {
+        "path": str(path),
+        "opened": bool(frames),
+        "frames_sampled": len(frames),
+        "changed_fraction": 0.0 if not diffs else len(changed) / len(diffs),
+        "mean_absdiff": 0.0 if not diffs else float(np.mean(diffs)),
+    }
+
+
+def video_motion_passes(
+    motion: Mapping,
+    changed_fraction_threshold: float = 0.15,
+    mean_absdiff_threshold: float = 0.5,
+) -> bool:
+    return (
+        float(motion.get("changed_fraction", 0.0)) >= changed_fraction_threshold
+        or float(motion.get("mean_absdiff", 0.0)) >= mean_absdiff_threshold
+    )
 
 
 def write_metadata(path: Path, data: Mapping):

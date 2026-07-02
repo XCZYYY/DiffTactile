@@ -590,6 +590,7 @@ def main():
     num_sub_steps = run_config.num_sub_steps
     num_total_steps = run_config.num_total_steps
     num_opt_steps = run_config.num_opt_steps
+    gui_refresh_stride = args.gui_refresh_stride if args.gui_refresh_stride and args.gui_refresh_stride > 0 else None
     dt = 5e-5
     record_video = False
     run_layout = make_run_dir(args.output_root, "box_open", args.run_name)
@@ -604,6 +605,7 @@ def main():
         "num_total_steps": num_total_steps,
         "num_opt_steps": num_opt_steps,
         "record_stride": run_config.record_stride,
+        "gui_refresh_stride": gui_refresh_stride,
     })
     video_recorder = None
     video_frames = 0
@@ -622,6 +624,24 @@ def main():
         gui1 = ti.GUI("Contact Viz")
         gui2 = ti.GUI("Force Map 1")
         gui3 = ti.GUI("Deformation Map 1")
+
+    def render_gui(frame_idx):
+        if off_screen:
+            return
+        frame_idx = max(0, min(int(frame_idx), num_sub_steps - 2))
+        viz_scale = 0.1
+        viz_offset = [0.0, 0.0]
+        contact_model.fem_sensor1.extract_markers(frame_idx)
+        init_2d = contact_model.fem_sensor1.virtual_markers.to_numpy()
+        marker_2d = contact_model.fem_sensor1.predict_markers.to_numpy()
+        contact_model.draw_markers(init_2d, marker_2d, gui2)
+        contact_model.draw_perspective(frame_idx)
+        gui1.circles(viz_scale * contact_model.draw_pos3.to_numpy() + viz_offset, radius=2, color=0x039dfc)
+        gui1.circles(viz_scale * contact_model.draw_pos2.to_numpy() + viz_offset, radius=2, color=0xe6c949)
+        contact_model.draw_triangles(contact_model.fem_sensor1, gui3, frame_idx, 0, 90, viz_scale, viz_offset)
+        gui1.show()
+        gui2.show()
+        gui3.show()
 
     losses = []
     contact_model.init_pos_control()
@@ -647,6 +667,8 @@ def main():
             contact_model.reset()
             for ss in range(num_sub_steps - 1):
                 contact_model.update(ss)
+                if gui_refresh_stride and ss % gui_refresh_stride == 0:
+                    render_gui(ss)
 
             contact_model.memory_to_cache(ts)
 
@@ -677,28 +699,7 @@ def main():
                 video_recorder.write_frame(frame)
                 video_frames += 1
 
-            ## visualizationw
-            viz_scale = 0.1
-            viz_offset = [0.0, 0.0]
-            # contact_model.lossNone] = 0.0
-
-            if not off_screen:
-                contact_model.fem_sensor1.extract_markers(0)
-                init_2d = contact_model.fem_sensor1.virtual_markers.to_numpy()
-                marker_2d = contact_model.fem_sensor1.predict_markers.to_numpy()
-                contact_model.draw_markers(init_2d, marker_2d, gui2)
-
-            ### the external force is not propogate to the last time step but the second last
-            # contact_model.draw_external_force(contact_model.fem_sensor1.sub_steps-2)
-            if not off_screen:
-                contact_model.draw_perspective(0)
-                gui1.circles(viz_scale * contact_model.draw_pos3.to_numpy() + viz_offset, radius=2, color=0x039dfc)
-                gui1.circles(viz_scale * contact_model.draw_pos2.to_numpy() + viz_offset, radius=2, color=0xe6c949)
-                contact_model.draw_triangles(contact_model.fem_sensor1, gui3, 0, 0, 90, viz_scale, viz_offset)
-                # contact_model.draw_deformation(scene, camera, window)
-                gui1.show()
-                gui2.show()
-                gui3.show()
+            render_gui(num_sub_steps - 2)
 
         ## backward!
         loss_frame = 0
@@ -763,31 +764,9 @@ def main():
                 for ss in range(num_sub_steps - 1):
                     contact_model.update(ss)
 
-            if not off_screen:
-                contact_model.fem_sensor1.extract_markers(0)
-                init_2d = contact_model.fem_sensor1.virtual_markers.to_numpy()
-                marker_2d = contact_model.fem_sensor1.predict_markers.to_numpy()
-                contact_model.draw_markers(init_2d, marker_2d, gui2)
-
-                contact_model.draw_perspective(0)
-                gui1.circles(viz_scale * contact_model.draw_pos3.to_numpy() + viz_offset, radius=2, color=0x039dfc)
-                gui1.circles(viz_scale * contact_model.draw_pos2.to_numpy() + viz_offset, radius=2, color=0xe6c949)
-                contact_model.draw_triangles(contact_model.fem_sensor1, gui3, 0, 0, 90, viz_scale, viz_offset)
-                # contact_model.draw_deformation(scene, camera, window)
-
-
-                gui1.show()
-                gui2.show()
-                gui3.show()
+            render_gui(0)
 
         losses.append(loss_frame)
-
-        legacy_dir = f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}"
-        if not os.path.exists(legacy_dir):
-            os.mkdir(legacy_dir)
-
-        if not os.path.exists(f"results"):
-            os.mkdir(f"results")
 
         ## save loss plot
         if opts % 5 == 0 or opts == num_opt_steps-1:
@@ -799,13 +778,10 @@ def main():
             plt.plot(losses)
             plot_name = f"box_open_state_{args.use_state}_tactile_{args.use_tactile}_{opts}.png"
             plt.savefig(run_layout.plots / plot_name)
-            plt.savefig(os.path.join(legacy_dir, plot_name))
             plt.close()
             np.save(run_layout.trajectories / f"control_pos_{opts}.npy", contact_model.p_sensor1.to_numpy())
             np.save(run_layout.trajectories / f"control_ori_{opts}.npy", contact_model.o_sensor1.to_numpy())
             np.save(run_layout.trajectories / f"losses_{opts}.npy", np.array(losses))
-            np.save(os.path.join(legacy_dir, f"control_pos_{opts}.npy"), contact_model.p_sensor1.to_numpy())
-            np.save(os.path.join(legacy_dir, f"control_ori_{opts}.npy"), contact_model.o_sensor1.to_numpy())
 
         ## save traj
         if loss_frame <= np.min(losses):
@@ -813,8 +789,6 @@ def main():
             best_o = contact_model.o_sensor1.to_numpy()
             np.save(run_layout.trajectories / "control_pos_best.npy", best_p)
             np.save(run_layout.trajectories / "control_ori_best.npy", best_o)
-            np.save(os.path.join(legacy_dir,"control_pos_best.npy"), best_p)
-            np.save(os.path.join(legacy_dir,"control_ori_best.npy"), best_o)
             print("Best traj saved!")
     if video_recorder is not None and video_recorder.frames_written:
         video_path = video_recorder.close()
@@ -836,6 +810,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_sub_steps", type=int, default=None)
     parser.add_argument("--num_total_steps", type=int, default=None)
     parser.add_argument("--num_opt_steps", type=int, default=None)
+    parser.add_argument("--gui_refresh_stride", type=int, default=None)
 
     args = parser.parse_args()
     USE_STATE = args.use_state

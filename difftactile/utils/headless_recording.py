@@ -60,10 +60,10 @@ def make_run_dir(output_root, task_name: str, run_name: Optional[str] = None) ->
         task_name=task_name,
         run_id=run_id,
         root=ensure_dir(root),
-        videos=ensure_dir(root / "videos"),
+        videos=root / "videos",
         plots=ensure_dir(root / "plots"),
         trajectories=ensure_dir(root / "trajectories"),
-        frames=ensure_dir(root / "frames"),
+        frames=root / "frames",
         logs=ensure_dir(output_root / "logs"),
         mirror_videos=ensure_dir(output_root / "videos"),
     )

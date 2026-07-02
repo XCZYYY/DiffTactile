@@ -29,6 +29,9 @@ def parse_args(argv):
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--use_existing_display", action="store_true")
     parser.add_argument("--ffmpeg_loglevel", default="info")
+    parser.add_argument("--ffmpeg_preset", default="ultrafast")
+    parser.add_argument("--cuda_device", default=None)
+    parser.add_argument("--pyopengl_platform", default=None)
     parser.add_argument("--no_auto_extend", action="store_true")
     args = parser.parse_args(main_argv)
     args.passthrough = passthrough
@@ -39,11 +42,16 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
     config = pr.resolve_profile(args.task, profile_name, passthrough)
     output_root = Path(args.output_root)
     layout = pr.prepare_platform_run_layout(output_root, args.task, run_name)
-    cuda_device = pr.choose_visible_gpu()
+    cuda_device = args.cuda_device or pr.choose_visible_gpu()
     started_at = time.time()
 
     with pr.display_context(args.width, args.height, args.use_existing_display) as display:
-        task_env = pr.task_environment(os.environ, display.display, cuda_visible_devices=cuda_device)
+        task_env = pr.task_environment(
+            os.environ,
+            display.display,
+            cuda_visible_devices=cuda_device,
+            pyopengl_platform=args.pyopengl_platform,
+        )
         window_manager = pr.start_window_manager(display.display, task_env)
         task_command = pr.build_task_command(
             repo_root=repo_root,
@@ -60,6 +68,7 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
             height=args.height,
             fps=args.fps,
             loglevel=args.ffmpeg_loglevel,
+            preset=args.ffmpeg_preset,
         )
         pr.write_metadata(
             layout.metadata_path,
@@ -74,11 +83,13 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
                 "height": args.height,
                 "fps": args.fps,
                 "cuda_visible_devices": cuda_device,
+                "pyopengl_platform": args.pyopengl_platform,
                 "task_command": task_command,
                 "ffmpeg_command": ffmpeg_command,
                 "num_sub_steps": config.num_sub_steps,
                 "num_total_steps": config.num_total_steps,
                 "num_opt_steps": config.num_opt_steps,
+                "gui_refresh_stride": config.gui_refresh_stride,
             },
         )
 
@@ -103,6 +114,7 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
 
     duration = pr.video_duration_seconds(layout.primary_video)
     readable = pr.video_is_readable_and_nonblank(layout.primary_video)
+    motion = pr.video_motion_score(layout.primary_video)
     mirrored_video = None
     if layout.primary_video.exists():
         pr.mirror_video(layout.primary_video, layout.mirror_video)
@@ -117,14 +129,17 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
             "elapsed_seconds": time.time() - started_at,
             "video_duration_seconds": duration,
             "video_readable_nonblank": readable,
+            "video_motion": motion,
             "video_path": str(layout.primary_video),
             "mirror_video": mirrored_video,
             "task_log": str(layout.task_log),
             "ffmpeg_log": str(layout.ffmpeg_log),
             "task_returncode": task_return,
+            "pyopengl_platform": args.pyopengl_platform,
             "num_sub_steps": config.num_sub_steps,
             "num_total_steps": config.num_total_steps,
             "num_opt_steps": config.num_opt_steps,
+            "gui_refresh_stride": config.gui_refresh_stride,
         },
     )
     if task_return != 0:

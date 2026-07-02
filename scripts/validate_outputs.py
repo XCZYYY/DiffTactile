@@ -5,6 +5,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from difftactile.utils import platform_recording as pr
+
 
 DEFAULT_OUTPUT_ROOT = Path("/data1/determined/users/thomas/Dataset/Difftactile/output")
 
@@ -32,6 +34,7 @@ def validate_platform_video(path: Path) -> dict:
         variances.append(float(np.var(frame)))
     cap.release()
     result["nonblank"] = bool(variances) and max(variances) > 1.0
+    result["motion"] = pr.video_motion_score(path)
     return result
 
 
@@ -56,6 +59,8 @@ def main() -> int:
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--require-platform-video", action="store_true")
     parser.add_argument("--allow-no-video", action="store_true")
+    parser.add_argument("--motion-threshold", type=float, default=0.0)
+    parser.add_argument("--mean-motion-threshold", type=float, default=0.5)
     args = parser.parse_args()
 
     output_root = Path(args.output_root)
@@ -93,6 +98,18 @@ def main() -> int:
         failures.append("one or more videos are unreadable or too small")
     if args.require_platform_video and any(not item["nonblank"] for item in platform_video_results):
         failures.append("one or more platform screen recordings are blank")
+    if args.require_platform_video and args.motion_threshold > 0:
+        low_motion = [
+            item["path"]
+            for item in platform_video_results
+            if not pr.video_motion_passes(
+                item["motion"],
+                changed_fraction_threshold=args.motion_threshold,
+                mean_absdiff_threshold=args.mean_motion_threshold,
+            )
+        ]
+        if low_motion:
+            failures.append("one or more platform screen recordings have low motion")
     if not plots:
         failures.append("no loss plots found")
     if not logs:
@@ -109,6 +126,8 @@ def main() -> int:
         "synthetic_videos": [str(path) for path in synthetic_videos],
         "require_platform_video": args.require_platform_video,
         "allow_no_video": args.allow_no_video,
+        "motion_threshold": args.motion_threshold,
+        "mean_motion_threshold": args.mean_motion_threshold,
         "ignored_incomplete_videos": ignored_videos,
         "completed_runs": [str(path) for path in completed_runs],
         "plots": [str(path) for path in plots],
