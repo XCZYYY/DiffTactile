@@ -36,7 +36,6 @@ run_task() {
         --use_state \
         --use_tactile \
         --headless \
-        --record_video \
         --smoke \
         --output_root "${OUTPUT_ROOT}"
   ) 2>&1 | tee "${OUTPUT_ROOT}/logs/${log_name}"
@@ -50,4 +49,4 @@ if [[ "${1:-}" == "--all" ]]; then
   run_task cable_straightening cable_straightening_smoke.log
 fi
 
-conda run -n "${CONDA_ENV}" python "${REPO_ROOT}/scripts/validate_outputs.py" --output-root "${OUTPUT_ROOT}"
+conda run -n "${CONDA_ENV}" python "${REPO_ROOT}/scripts/validate_outputs.py" --output-root "${OUTPUT_ROOT}" --allow-no-video

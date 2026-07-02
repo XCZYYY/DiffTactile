@@ -31,6 +31,7 @@ from difftactile.utils.headless_recording import (
     resolve_run_config,
     save_json,
 )
+from difftactile.utils.platform_recording import reject_inline_record_video
 
 
 Off_screen = False
@@ -704,6 +705,7 @@ def hasnan(vector):
 def main():
     global Off_screen
     Off_screen = resolve_headless(args.headless)
+    reject_inline_record_video(bool(args.record_video), "cable_straightening")
     ti.init(arch=ti.gpu, device_memory_GB=4)
     run_config = resolve_run_config(
         default_sub_steps=50,
@@ -718,7 +720,7 @@ def main():
     num_sub_steps = run_config.num_sub_steps
     num_total_steps = run_config.num_total_steps
     num_opt_steps = run_config.num_opt_steps
-    record_video = args.record_video if args.record_video is not None else Off_screen
+    record_video = False
     run_layout = make_run_dir(args.output_root, "cable_straightening", args.run_name)
     save_json(run_layout.root / "metadata.json", {
         "task": "cable_straightening",
@@ -970,8 +972,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_tactile", action = "store_true", help = "whether to use tactile loss")
     parser.add_argument("--output_root", default=str(DEFAULT_OUTPUT_ROOT), help="canonical output root")
     parser.add_argument("--headless", action="store_true", help="disable GUI windows")
-    parser.add_argument("--record_video", dest="record_video", action="store_true", default=None, help="record a headless video")
-    parser.add_argument("--no_record_video", dest="record_video", action="store_false", help="disable video recording")
+    parser.add_argument("--record_video", dest="record_video", action="store_true", default=None, help="deprecated; use scripts/record_platform_run.py")
+    parser.add_argument("--no_record_video", dest="record_video", action="store_false", help="deprecated no-op")
     parser.add_argument("--video_fps", type=int, default=30)
     parser.add_argument("--record_stride", type=int, default=None)
     parser.add_argument("--run_name", default=None)

@@ -33,6 +33,7 @@ from difftactile.utils.headless_recording import (
     resolve_run_config,
     save_json,
 )
+from difftactile.utils.platform_recording import reject_inline_record_video
 import argparse
 
 TI_TYPE = ti.f32
@@ -571,6 +572,7 @@ def main():
     off_screen = resolve_headless(args.headless)
     if off_screen and os.environ.get("MPLBACKEND") is None:
         matplotlib.use("Agg")
+    reject_inline_record_video(bool(args.record_video), "box_open")
 
     ti.init(arch=ti.gpu, device_memory_GB=4)
 
@@ -589,7 +591,7 @@ def main():
     num_total_steps = run_config.num_total_steps
     num_opt_steps = run_config.num_opt_steps
     dt = 5e-5
-    record_video = args.record_video if args.record_video is not None else off_screen
+    record_video = False
     run_layout = make_run_dir(args.output_root, "box_open", args.run_name)
     save_json(run_layout.root / "metadata.json", {
         "task": "box_open",
@@ -825,8 +827,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_tactile", action = "store_true", help = "whether to use tactile loss")
     parser.add_argument("--output_root", default=str(DEFAULT_OUTPUT_ROOT), help="canonical output root")
     parser.add_argument("--headless", action="store_true", help="disable GUI windows")
-    parser.add_argument("--record_video", dest="record_video", action="store_true", default=None, help="record a headless video")
-    parser.add_argument("--no_record_video", dest="record_video", action="store_false", help="disable video recording")
+    parser.add_argument("--record_video", dest="record_video", action="store_true", default=None, help="deprecated; use scripts/record_platform_run.py")
+    parser.add_argument("--no_record_video", dest="record_video", action="store_false", help="deprecated no-op")
     parser.add_argument("--video_fps", type=int, default=30)
     parser.add_argument("--record_stride", type=int, default=None)
     parser.add_argument("--run_name", default=None)
