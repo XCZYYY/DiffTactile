@@ -32,6 +32,16 @@ from difftactile.utils.headless_recording import (
     save_json,
 )
 from difftactile.utils.platform_recording import reject_inline_record_video
+from difftactile.utils.presentation_demo import (
+    apply_camera_sweep,
+    apply_gripper_replay_controls,
+    draw_demo_overlay,
+    fit_points_to_view,
+    mark_ready,
+    maybe_sleep,
+    presentation_viewport,
+    replay_frame_delay,
+)
 
 
 Off_screen = False
@@ -737,6 +747,8 @@ def main():
         "record_stride": run_config.record_stride,
         "gui_refresh_stride": gui_refresh_stride,
         "disable_3d_window": args.disable_3d_window,
+        "demo_mode": args.demo_mode,
+        "ready_file": args.ready_file,
     })
     video_recorder = None
     video_frames = 0
@@ -767,20 +779,51 @@ def main():
     dt = 5e-4
     contact_model = Contact(use_tactile=USE_TACTILE, use_state=USE_STATE, dt=dt, total_steps = num_total_steps, sub_steps = num_sub_steps)
 
-    def render_gui(frame_idx):
+    def render_gui(frame_idx, stage="Forward", step=0, total_steps=None):
         if Off_screen:
             return
         frame_idx = max(0, min(int(frame_idx), num_sub_steps - 2))
-        viz_scale = 0.2
-        viz_offset = [0.5, 0.2]
+        presentation = args.demo_mode == "replay"
+        viz_scale = 0.26 if presentation else 0.2
+        viz_offset = [0.40, 0.16] if presentation else [0.5, 0.2]
         contact_model.gripper.fem_sensor1.extract_markers(frame_idx)
         init_2d = contact_model.gripper.fem_sensor1.virtual_markers.to_numpy()
         marker_2d = contact_model.gripper.fem_sensor1.predict_markers.to_numpy()
         contact_model.draw_markers(init_2d, marker_2d, gui2)
+        if presentation:
+            apply_camera_sweep(contact_model, step, total_steps or num_total_steps, base_phi=90.0, base_theta=0.0)
         contact_model.draw_perspective(frame_idx)
+        if presentation:
+            center, target_span = presentation_viewport(
+                step,
+                total_steps or num_total_steps,
+                x_amplitude=0.12,
+                y_amplitude=0.06,
+                zoom_amplitude=0.08,
+            )
+            viz_scale, viz_offset = fit_points_to_view(
+                [
+                    contact_model.draw_pos.to_numpy(),
+                    contact_model.draw_pos1.to_numpy(),
+                    contact_model.draw_pos2.to_numpy(),
+                ],
+                center=center,
+                target_span=target_span,
+                fallback_scale=viz_scale,
+                fallback_offset=viz_offset,
+            )
         gui1.circles(viz_scale * contact_model.draw_pos.to_numpy() + viz_offset, radius=15, color=0x039dfc)
         gui1.circles(viz_scale * contact_model.draw_pos1.to_numpy() + viz_offset, radius=2, color=0xe6c949)
         gui1.circles(viz_scale * contact_model.draw_pos2.to_numpy() + viz_offset, radius=2, color=0xf542a1)
+        draw_demo_overlay(
+            gui1,
+            "cable_straightening",
+            args.demo_title,
+            stage,
+            step,
+            total_steps or num_total_steps,
+            enabled=args.demo_overlay,
+        )
         contact_model.draw_triangles(contact_model.gripper.fem_sensor1, gui3, frame_idx, 0, 90, viz_scale, viz_offset)
         gui1.show()
         gui2.show()
@@ -806,6 +849,61 @@ def main():
     contact_model.draw_table()
     contact_model.init_control_parameters()
     contact_model.load_target()
+
+    def run_replay_demo():
+        print("Running cable_straightening replay presentation")
+        pos, ori, width = apply_gripper_replay_controls(contact_model)
+        np.save(run_layout.trajectories / "control_p_gripper_replay.npy", pos)
+        np.save(run_layout.trajectories / "control_o_gripper_replay.npy", ori)
+        np.save(run_layout.trajectories / "control_w_gripper_replay.npy", width)
+
+        delay = replay_frame_delay(args.replay_speed)
+        loops = max(1, int(args.replay_loops))
+        total_replay_steps = loops * max(1, num_total_steps - 1) * max(1, num_sub_steps - 1)
+        contact_model.init()
+        contact_model.clear_all_grad()
+        for _ in range(max(1, int(args.demo_warmup_frames))):
+            render_gui(0, "Ready: cable, tactile gripper, force maps", 0, total_replay_steps)
+            maybe_sleep(delay)
+        mark_ready(args.ready_file)
+
+        global_step = 0
+        for loop_idx in range(loops):
+            contact_model.init()
+            contact_model.clear_all_grad()
+            for ts in range(num_total_steps - 1):
+                contact_model.set_pos_control(ts)
+                for ss in range(num_sub_steps - 1):
+                    contact_model.gripper.kinematic(ss)
+                    contact_model.update_visualization(ss + 1)
+                contact_model.gripper.set_sensor_vel(0)
+                contact_model.gripper.set_sensor_pos(num_sub_steps - 1)
+                contact_model.reset()
+                for ss in range(num_sub_steps - 1):
+                    contact_model.update(ss)
+                    render_gui(ss, f"Replay loop {loop_idx + 1}/{loops}: grasp and straighten", global_step, total_replay_steps)
+                    maybe_sleep(delay)
+                    global_step += 1
+                contact_model.memory_to_cache(ts)
+                contact_model.compute_contact_force(num_sub_steps - 2)
+                contact_model.compute_force_loss()
+                contact_model.compute_contact_loc(num_sub_steps - 2)
+                contact_model.compute_loc_loss()
+                if USE_STATE:
+                    contact_model.compute_rope_pos_loss(num_sub_steps - 2)
+        plt.figure()
+        plt.title("Replay Gripper Control")
+        plt.ylabel("control value")
+        plt.xlabel("Replay step")
+        plt.plot(pos[:, 0], label="x velocity")
+        plt.plot(width, label="grip width velocity")
+        plt.legend()
+        plt.savefig(run_layout.plots / "cable_straightening_replay_controls.png")
+        plt.close()
+
+    if args.demo_mode == "replay":
+        run_replay_demo()
+        return
 
     form_loss = 0
     losses = []
@@ -978,6 +1076,14 @@ if __name__ == "__main__":
     parser.add_argument("--num_opt_steps", type=int, default=None)
     parser.add_argument("--gui_refresh_stride", type=int, default=None)
     parser.add_argument("--disable_3d_window", action="store_true")
+    parser.add_argument("--demo_mode", choices=["optimize", "replay"], default="optimize")
+    parser.add_argument("--ready_file", default=None)
+    parser.add_argument("--replay_loops", type=int, default=1)
+    parser.add_argument("--replay_speed", type=float, default=1.0)
+    parser.add_argument("--demo_warmup_frames", type=int, default=5)
+    parser.add_argument("--demo_title", default=None)
+    parser.add_argument("--demo_overlay", dest="demo_overlay", action="store_true", default=False)
+    parser.add_argument("--no_demo_overlay", dest="demo_overlay", action="store_false")
 
     args = parser.parse_args()
     USE_STATE = args.use_state

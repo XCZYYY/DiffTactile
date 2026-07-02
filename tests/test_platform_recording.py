@@ -28,6 +28,21 @@ class PlatformRecordingTests(unittest.TestCase):
         self.assertEqual(config.num_opt_steps, 2)
         self.assertEqual(config.min_duration_seconds, 60)
 
+    def test_replay_profile_expands_to_presentation_defaults(self):
+        config = pr.resolve_profile("box_open", "replay", [])
+        self.assertEqual(config.task, "box_open")
+        self.assertEqual(config.num_sub_steps, 6)
+        self.assertEqual(config.num_total_steps, 90)
+        self.assertEqual(config.num_opt_steps, 1)
+        self.assertEqual(config.min_duration_seconds, 45)
+        self.assertEqual(config.gui_refresh_stride, 1)
+
+        args = pr.task_passthrough_args(config, ["--use_state"])
+        self.assertIn("--demo_mode", args)
+        self.assertIn("replay", args)
+        self.assertIn("--replay_loops", args)
+        self.assertIn("--demo_overlay", args)
+
     def test_explicit_passthrough_overrides_profile_steps(self):
         config = pr.resolve_profile(
             "box_open",
@@ -62,6 +77,21 @@ class PlatformRecordingTests(unittest.TestCase):
         self.assertIn("libx264", cmd)
         self.assertIn("ultrafast", cmd)
         self.assertIn("yuv420p", cmd)
+
+    def test_ffmpeg_command_can_wait_for_ready_file(self):
+        cmd = pr.build_ffmpeg_command(
+            display=":101",
+            output_path=Path("/tmp/out.mp4"),
+            width=1280,
+            height=720,
+            fps=30,
+            ready_file=Path("/tmp/ready.flag"),
+        )
+        self.assertEqual(cmd[:2], ["bash", "-lc"])
+        shell_script = cmd[2]
+        self.assertIn("/tmp/ready.flag", shell_script)
+        self.assertIn("x11grab", shell_script)
+        self.assertIn("1280x720", shell_script)
 
     def test_record_platform_run_accepts_explicit_cuda_device(self):
         args = record_platform_run.parse_args(
@@ -148,6 +178,28 @@ class PlatformRecordingTests(unittest.TestCase):
             result = pr.video_motion_score(video_path, sample_count=8)
             self.assertEqual(result["changed_fraction"], 0.0)
             self.assertLess(result["mean_absdiff"], 1.0)
+
+    def test_presentation_quality_detects_active_motion_and_static_runs(self):
+        diffs = [0.0, 0.8, 0.9, 0.7, 0.0, 0.6, 0.7, 0.8, 0.0, 0.9]
+        quality = pr.motion_quality_from_diffs(diffs, active_threshold=0.5)
+        self.assertAlmostEqual(quality["active_fraction"], 0.7)
+        self.assertEqual(quality["longest_static_run_seconds"], 1)
+        self.assertTrue(
+            pr.presentation_motion_passes(
+                quality,
+                active_fraction_threshold=0.6,
+                max_static_run_seconds=5,
+            )
+        )
+
+        static_quality = pr.motion_quality_from_diffs([0.0, 0.0, 0.7, 0.0, 0.0, 0.0], active_threshold=0.5)
+        self.assertFalse(
+            pr.presentation_motion_passes(
+                static_quality,
+                active_fraction_threshold=0.6,
+                max_static_run_seconds=2,
+            )
+        )
 
     def test_motion_passes_on_fraction_or_mean_difference(self):
         self.assertTrue(

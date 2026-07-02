@@ -34,6 +34,16 @@ from difftactile.utils.headless_recording import (
     save_json,
 )
 from difftactile.utils.platform_recording import reject_inline_record_video
+from difftactile.utils.presentation_demo import (
+    apply_camera_sweep,
+    apply_single_sensor_replay_controls,
+    draw_demo_overlay,
+    fit_points_to_view,
+    mark_ready,
+    maybe_sleep,
+    presentation_viewport,
+    replay_frame_delay,
+)
 import argparse
 
 TI_TYPE = ti.f32
@@ -606,6 +616,8 @@ def main():
         "num_opt_steps": num_opt_steps,
         "record_stride": run_config.record_stride,
         "gui_refresh_stride": gui_refresh_stride,
+        "demo_mode": args.demo_mode,
+        "ready_file": args.ready_file,
     })
     video_recorder = None
     video_frames = 0
@@ -625,27 +637,102 @@ def main():
         gui2 = ti.GUI("Force Map 1")
         gui3 = ti.GUI("Deformation Map 1")
 
-    def render_gui(frame_idx):
+    def render_gui(frame_idx, stage="Forward", step=0, total_steps=None):
         if off_screen:
             return
         frame_idx = max(0, min(int(frame_idx), num_sub_steps - 2))
-        viz_scale = 0.1
-        viz_offset = [0.0, 0.0]
+        presentation = args.demo_mode == "replay"
+        viz_scale = 0.18 if presentation else 0.1
+        viz_offset = [0.20, 0.10] if presentation else [0.0, 0.0]
         contact_model.fem_sensor1.extract_markers(frame_idx)
         init_2d = contact_model.fem_sensor1.virtual_markers.to_numpy()
         marker_2d = contact_model.fem_sensor1.predict_markers.to_numpy()
         contact_model.draw_markers(init_2d, marker_2d, gui2)
+        if presentation:
+            apply_camera_sweep(contact_model, step, total_steps or num_total_steps, base_phi=0.0, base_theta=0.0)
         contact_model.draw_perspective(frame_idx)
+        if presentation:
+            center, target_span = presentation_viewport(step, total_steps or num_total_steps)
+            viz_scale, viz_offset = fit_points_to_view(
+                [contact_model.draw_pos3.to_numpy(), contact_model.draw_pos2.to_numpy()],
+                center=center,
+                target_span=target_span,
+                fallback_scale=viz_scale,
+                fallback_offset=viz_offset,
+            )
         gui1.circles(viz_scale * contact_model.draw_pos3.to_numpy() + viz_offset, radius=2, color=0x039dfc)
         gui1.circles(viz_scale * contact_model.draw_pos2.to_numpy() + viz_offset, radius=2, color=0xe6c949)
+        draw_demo_overlay(
+            gui1,
+            "box_open",
+            args.demo_title,
+            stage,
+            step,
+            total_steps or num_total_steps,
+            enabled=args.demo_overlay,
+        )
         contact_model.draw_triangles(contact_model.fem_sensor1, gui3, frame_idx, 0, 90, viz_scale, viz_offset)
         gui1.show()
         gui2.show()
         gui3.show()
 
+    def run_replay_demo():
+        print("Running box_open replay presentation")
+        contact_model.init_pos_control()
+        pos, ori = apply_single_sensor_replay_controls(contact_model, "box_open")
+        contact_model.load_target()
+        np.save(run_layout.trajectories / "control_pos_replay.npy", pos)
+        np.save(run_layout.trajectories / "control_ori_replay.npy", ori)
+
+        delay = replay_frame_delay(args.replay_speed)
+        loops = max(1, int(args.replay_loops))
+        total_replay_steps = loops * max(1, num_total_steps - 1) * max(1, num_sub_steps - 1)
+        contact_model.init()
+        contact_model.clear_all_grad()
+        contact_model.clear_state_loss_grad()
+        for _ in range(max(1, int(args.demo_warmup_frames))):
+            render_gui(0, "Ready: tactile dome, object, and tactile maps", 0, total_replay_steps)
+            maybe_sleep(delay)
+        mark_ready(args.ready_file)
+
+        global_step = 0
+        for loop_idx in range(loops):
+            contact_model.init()
+            contact_model.clear_all_grad()
+            contact_model.clear_state_loss_grad()
+            for ts in range(num_total_steps - 1):
+                contact_model.iter = ts
+                contact_model.set_pos_control(ts)
+                contact_model.fem_sensor1.set_pose_control()
+                contact_model.fem_sensor1.set_control_vel(0)
+                contact_model.fem_sensor1.set_vel(0)
+                contact_model.reset()
+                for ss in range(num_sub_steps - 1):
+                    contact_model.update(ss)
+                    render_gui(ss, f"Replay loop {loop_idx + 1}/{loops}: press then push", global_step, total_replay_steps)
+                    maybe_sleep(delay)
+                    global_step += 1
+                contact_model.memory_to_cache(ts)
+                if USE_TACTILE:
+                    contact_model.compute_contact_force(num_sub_steps - 2)
+                    contact_model.compute_force_loss()
+                if USE_STATE:
+                    contact_model.compute_angle(ts)
+        plt.figure()
+        plt.title("Replay Control Magnitude")
+        plt.ylabel("||control velocity||")
+        plt.xlabel("Replay step")
+        plt.plot(np.linalg.norm(pos, axis=1))
+        plt.savefig(run_layout.plots / "box_open_replay_controls.png")
+        plt.close()
+
     losses = []
     contact_model.init_pos_control()
     contact_model.load_target()
+
+    if args.demo_mode == "replay":
+        run_replay_demo()
+        return
 
     # contact_model.load_pos_control()
 
@@ -811,6 +898,14 @@ if __name__ == "__main__":
     parser.add_argument("--num_total_steps", type=int, default=None)
     parser.add_argument("--num_opt_steps", type=int, default=None)
     parser.add_argument("--gui_refresh_stride", type=int, default=None)
+    parser.add_argument("--demo_mode", choices=["optimize", "replay"], default="optimize")
+    parser.add_argument("--ready_file", default=None)
+    parser.add_argument("--replay_loops", type=int, default=1)
+    parser.add_argument("--replay_speed", type=float, default=1.0)
+    parser.add_argument("--demo_warmup_frames", type=int, default=5)
+    parser.add_argument("--demo_title", default=None)
+    parser.add_argument("--demo_overlay", dest="demo_overlay", action="store_true", default=False)
+    parser.add_argument("--no_demo_overlay", dest="demo_overlay", action="store_false")
 
     args = parser.parse_args()
     USE_STATE = args.use_state

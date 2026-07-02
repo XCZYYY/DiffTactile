@@ -32,10 +32,15 @@ def parse_args(argv):
     parser.add_argument("--ffmpeg_preset", default="ultrafast")
     parser.add_argument("--cuda_device", default=None)
     parser.add_argument("--pyopengl_platform", default=None)
+    parser.add_argument("--ready_file", default=None)
     parser.add_argument("--no_auto_extend", action="store_true")
     args = parser.parse_args(main_argv)
     args.passthrough = passthrough
     return args
+
+
+def _has_task_arg(args, name):
+    return any(item == name or item.startswith(name + "=") for item in args)
 
 
 def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
@@ -44,6 +49,14 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
     layout = pr.prepare_platform_run_layout(output_root, args.task, run_name)
     cuda_device = args.cuda_device or pr.choose_visible_gpu()
     started_at = time.time()
+    ready_file = None
+    task_passthrough = list(passthrough)
+    if args.ready_file or config.profile == "replay":
+        ready_file = Path(args.ready_file) if args.ready_file else layout.root / "recording_ready.flag"
+        if ready_file.exists():
+            ready_file.unlink()
+        if not _has_task_arg(task_passthrough, "--ready_file"):
+            task_passthrough = ["--ready_file", str(ready_file)] + task_passthrough
 
     with pr.display_context(args.width, args.height, args.use_existing_display) as display:
         task_env = pr.task_environment(
@@ -59,7 +72,7 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
             config=config,
             output_root=output_root,
             run_name=layout.run_id,
-            extra_args=passthrough,
+            extra_args=task_passthrough,
         )
         ffmpeg_command = pr.build_ffmpeg_command(
             display=display.display,
@@ -69,6 +82,7 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
             fps=args.fps,
             loglevel=args.ffmpeg_loglevel,
             preset=args.ffmpeg_preset,
+            ready_file=ready_file,
         )
         pr.write_metadata(
             layout.metadata_path,
@@ -86,6 +100,7 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
                 "pyopengl_platform": args.pyopengl_platform,
                 "task_command": task_command,
                 "ffmpeg_command": ffmpeg_command,
+                "ready_file": str(ready_file) if ready_file is not None else None,
                 "num_sub_steps": config.num_sub_steps,
                 "num_total_steps": config.num_total_steps,
                 "num_opt_steps": config.num_opt_steps,
@@ -115,6 +130,8 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
     duration = pr.video_duration_seconds(layout.primary_video)
     readable = pr.video_is_readable_and_nonblank(layout.primary_video)
     motion = pr.video_motion_score(layout.primary_video)
+    if layout.primary_video.exists():
+        motion["presentation_quality"] = pr.video_presentation_quality(layout.primary_video)
     mirrored_video = None
     if layout.primary_video.exists():
         pr.mirror_video(layout.primary_video, layout.mirror_video)
@@ -134,6 +151,7 @@ def run_once(args, profile_name, run_name, passthrough, repo_root: Path):
             "mirror_video": mirrored_video,
             "task_log": str(layout.task_log),
             "ffmpeg_log": str(layout.ffmpeg_log),
+            "ready_file": str(ready_file) if ready_file is not None else None,
             "task_returncode": task_return,
             "pyopengl_platform": args.pyopengl_platform,
             "num_sub_steps": config.num_sub_steps,

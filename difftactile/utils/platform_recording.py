@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ PROFILE_STEPS = {
     "smoke": (10, 20, 1, 0, None),
     "demo": (8, 90, 2, 60, 2),
     "demo_retry": (6, 120, 2, 60, 1),
+    "replay": (6, 90, 1, 45, 1),
     "long": (20, 300, 10, 600, None),
     "long_extended": (20, 600, 20, 600, None),
 }
@@ -108,6 +110,17 @@ def task_passthrough_args(config: TaskProfile, extra_args: Sequence[str]) -> Lis
             args = [name, str(value)] + args
     if config.gui_refresh_stride is not None and not _has_arg(args, "--gui_refresh_stride"):
         args = ["--gui_refresh_stride", str(config.gui_refresh_stride)] + args
+    if config.profile == "replay":
+        for name, value in [
+            ("--demo_mode", "replay"),
+            ("--replay_loops", "2"),
+            ("--replay_speed", "1.0"),
+            ("--demo_warmup_frames", "8"),
+        ]:
+            if not _has_arg(args, name):
+                args = [name, str(value)] + args
+        if "--demo_overlay" not in args and "--no_demo_overlay" not in args:
+            args = ["--demo_overlay"] + args
     return args
 
 
@@ -169,8 +182,9 @@ def build_ffmpeg_command(
     fps: int = 30,
     loglevel: str = "info",
     preset: str = "ultrafast",
+    ready_file: Optional[Path] = None,
 ) -> List[str]:
-    return [
+    command = [
         "ffmpeg",
         "-y",
         "-hide_banner",
@@ -193,6 +207,14 @@ def build_ffmpeg_command(
         "yuv420p",
         str(output_path),
     ]
+    if ready_file is None:
+        return command
+    wait_script = (
+        f"while [ ! -f {shlex.quote(str(ready_file))} ]; do sleep 0.1; done; "
+        + "exec "
+        + " ".join(shlex.quote(part) for part in command)
+    )
+    return ["bash", "-lc", wait_script]
 
 
 def x11grab_input(display: str) -> str:
@@ -448,6 +470,103 @@ def video_motion_score(
         "changed_fraction": 0.0 if not diffs else len(changed) / len(diffs),
         "mean_absdiff": 0.0 if not diffs else float(np.mean(diffs)),
     }
+
+
+def motion_quality_from_diffs(diffs: Sequence[float], active_threshold: float = 0.5) -> dict:
+    active = [value for value in diffs if value >= active_threshold]
+    longest_static = 0
+    current_static = 0
+    for value in diffs:
+        if value < active_threshold:
+            current_static += 1
+            longest_static = max(longest_static, current_static)
+        else:
+            current_static = 0
+    return {
+        "active_threshold": active_threshold,
+        "samples": len(diffs),
+        "active_samples": len(active),
+        "active_fraction": 0.0 if not diffs else len(active) / len(diffs),
+        "longest_static_run_seconds": longest_static,
+        "mean_absdiff": 0.0 if not diffs else float(np.mean(diffs)),
+        "median_absdiff": 0.0 if not diffs else float(np.median(diffs)),
+        "max_absdiff": 0.0 if not diffs else float(max(diffs)),
+    }
+
+
+def presentation_motion_passes(
+    quality: Mapping,
+    active_fraction_threshold: float = 0.6,
+    max_static_run_seconds: int = 5,
+) -> bool:
+    return (
+        float(quality.get("active_fraction", 0.0)) >= active_fraction_threshold
+        and int(quality.get("longest_static_run_seconds", 10**6)) <= max_static_run_seconds
+    )
+
+
+def video_presentation_quality(
+    path: Path,
+    active_threshold: float = 0.5,
+    black_threshold: float = 4.0,
+) -> dict:
+    if not path.exists() or path.stat().st_size <= 1000:
+        return {
+            "path": str(path),
+            "opened": False,
+            "active_fraction": 0.0,
+            "longest_static_run_seconds": 10**6,
+            "first_visible_second": None,
+            "black_fraction": 1.0,
+        }
+    cap = cv2.VideoCapture(str(path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration = frames / fps if fps else 0.0
+    if not cap.isOpened() or duration <= 0:
+        cap.release()
+        return {
+            "path": str(path),
+            "opened": False,
+            "active_fraction": 0.0,
+            "longest_static_run_seconds": 10**6,
+            "first_visible_second": None,
+            "black_fraction": 1.0,
+        }
+
+    previous = None
+    diffs = []
+    visible_seconds = []
+    black_count = 0
+    sample_count = max(1, int(duration))
+    for second in range(sample_count):
+        cap.set(cv2.CAP_PROP_POS_MSEC, second * 1000)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if float(np.mean(gray)) <= black_threshold:
+            black_count += 1
+        else:
+            visible_seconds.append(second)
+        if previous is not None:
+            diffs.append(float(np.mean(cv2.absdiff(previous, gray))))
+        previous = gray
+    cap.release()
+
+    quality = motion_quality_from_diffs(diffs, active_threshold=active_threshold)
+    quality.update(
+        {
+            "path": str(path),
+            "opened": True,
+            "duration_seconds": duration,
+            "fps": fps,
+            "frames": frames,
+            "first_visible_second": min(visible_seconds) if visible_seconds else None,
+            "black_fraction": 0.0 if sample_count == 0 else black_count / sample_count,
+        }
+    )
+    return quality
 
 
 def video_motion_passes(
