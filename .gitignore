@@ -1,2 +1,5 @@
 .DS_Store
 __pycache__/
+*.egg-info/
+difftactile/tasks/results/
+difftactile/tasks/lr_*/

@@ -5,10 +5,16 @@ a box opening task
 import taichi as ti
 from math import pi
 import numpy as np
-import matplotlib.pyplot as plt
-
-import cv2
 import os
+
+if os.environ.get("DIFFTACTILE_HEADLESS", "").lower() in {"1", "true", "yes", "on"} or os.environ.get("DISPLAY") in (None, ""):
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+
+import matplotlib
+if os.environ.get("MPLBACKEND") is None:
+    matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import cv2
 
 off_screen = False
 # if off_screen:
@@ -17,6 +23,16 @@ off_screen = False
 import trimesh
 from difftactile.sensor_model.fem_sensor import FEMDomeSensor
 from difftactile.object_model.multi_obj import MultiObj
+from difftactile.utils.headless_recording import (
+    DEFAULT_OUTPUT_ROOT,
+    VideoRecorder,
+    draw_task_frame,
+    make_run_dir,
+    max_video_frames,
+    resolve_headless,
+    resolve_run_config,
+    save_json,
+)
 import argparse
 
 TI_TYPE = ti.f32
@@ -551,13 +567,53 @@ def transform_2d(point, angle, translate):
 
 
 def main():
+    global off_screen
+    off_screen = resolve_headless(args.headless)
+    if off_screen and os.environ.get("MPLBACKEND") is None:
+        matplotlib.use("Agg")
+
     ti.init(arch=ti.gpu, device_memory_GB=4)
 
     obj_name = "earpod-case.stl"
-    num_sub_steps = 50
-    num_total_steps = 600
-    num_opt_steps = 100
+    run_config = resolve_run_config(
+        default_sub_steps=50,
+        default_total_steps=600,
+        default_opt_steps=100,
+        smoke=args.smoke,
+        num_sub_steps=args.num_sub_steps,
+        num_total_steps=args.num_total_steps,
+        num_opt_steps=args.num_opt_steps,
+        record_stride=args.record_stride,
+    )
+    num_sub_steps = run_config.num_sub_steps
+    num_total_steps = run_config.num_total_steps
+    num_opt_steps = run_config.num_opt_steps
     dt = 5e-5
+    record_video = args.record_video if args.record_video is not None else off_screen
+    run_layout = make_run_dir(args.output_root, "box_open", args.run_name)
+    save_json(run_layout.root / "metadata.json", {
+        "task": "box_open",
+        "run_id": run_layout.run_id,
+        "headless": off_screen,
+        "record_video": record_video,
+        "use_state": USE_STATE,
+        "use_tactile": USE_TACTILE,
+        "num_sub_steps": num_sub_steps,
+        "num_total_steps": num_total_steps,
+        "num_opt_steps": num_opt_steps,
+        "record_stride": run_config.record_stride,
+    })
+    video_recorder = None
+    video_frames = 0
+    video_limit = max_video_frames()
+    if record_video:
+        video_recorder = VideoRecorder(
+            run_layout.videos / "box_open.mp4",
+            fps=args.video_fps,
+            frame_size=(960, 720),
+            mirror_paths=[run_layout.mirror_videos / f"{run_layout.run_id}_box_open.mp4"],
+        )
+
     contact_model = Contact(use_tactile=USE_TACTILE, use_state=USE_STATE, dt=dt, total_steps = num_total_steps, sub_steps = num_sub_steps,  obj=obj_name)
 
     if not off_screen:
@@ -606,6 +662,18 @@ def main():
                 contact_model.compute_angle(ts)
                 print("angle",  contact_model.angle[ts])
 
+            if video_recorder is not None and ts % run_config.record_stride == 0 and video_frames < video_limit:
+                frame = draw_task_frame(
+                    contact_model,
+                    "box_open",
+                    opts,
+                    ts,
+                    loss=float(contact_model.loss[None]),
+                    width=960,
+                    height=720,
+                )
+                video_recorder.write_frame(frame)
+                video_frames += 1
 
             ## visualizationw
             viz_scale = 0.1
@@ -712,9 +780,9 @@ def main():
 
         losses.append(loss_frame)
 
-
-        if not os.path.exists(f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}"):
-            os.mkdir(f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}")
+        legacy_dir = f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}"
+        if not os.path.exists(legacy_dir):
+            os.mkdir(legacy_dir)
 
         if not os.path.exists(f"results"):
             os.mkdir(f"results")
@@ -722,27 +790,50 @@ def main():
         ## save loss plot
         if opts % 5 == 0 or opts == num_opt_steps-1:
             print("# Iter ", opts, "Opt step loss: ", loss_frame)
+            plt.figure()
             plt.title("Trajectory Optimization")
             plt.ylabel("Loss")
             plt.xlabel("Iter") # "Gradient Descent Iterations"
             plt.plot(losses)
-            plt.savefig(os.path.join(f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}",f"box_open_state_{args.use_state}_tactile_{args.use_tactile}_{opts}.png"))
-            np.save(os.path.join(f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}", f"control_pos_{opts}.npy"), contact_model.p_sensor1.to_numpy())
-            np.save(os.path.join(f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}", f"control_ori_{opts}.npy"), contact_model.o_sensor1.to_numpy())
+            plot_name = f"box_open_state_{args.use_state}_tactile_{args.use_tactile}_{opts}.png"
+            plt.savefig(run_layout.plots / plot_name)
+            plt.savefig(os.path.join(legacy_dir, plot_name))
+            plt.close()
+            np.save(run_layout.trajectories / f"control_pos_{opts}.npy", contact_model.p_sensor1.to_numpy())
+            np.save(run_layout.trajectories / f"control_ori_{opts}.npy", contact_model.o_sensor1.to_numpy())
+            np.save(run_layout.trajectories / f"losses_{opts}.npy", np.array(losses))
+            np.save(os.path.join(legacy_dir, f"control_pos_{opts}.npy"), contact_model.p_sensor1.to_numpy())
+            np.save(os.path.join(legacy_dir, f"control_ori_{opts}.npy"), contact_model.o_sensor1.to_numpy())
 
         ## save traj
         if loss_frame <= np.min(losses):
             best_p = contact_model.p_sensor1.to_numpy()
             best_o = contact_model.o_sensor1.to_numpy()
-            np.save(os.path.join(f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}","control_pos_best.npy"), best_p)
-            np.save(os.path.join(f"lr_box_open_state_{args.use_state}_tactile_{args.use_tactile}","control_ori_best.npy"), best_o)
+            np.save(run_layout.trajectories / "control_pos_best.npy", best_p)
+            np.save(run_layout.trajectories / "control_ori_best.npy", best_o)
+            np.save(os.path.join(legacy_dir,"control_pos_best.npy"), best_p)
+            np.save(os.path.join(legacy_dir,"control_ori_best.npy"), best_o)
             print("Best traj saved!")
+    if video_recorder is not None and video_recorder.frames_written:
+        video_path = video_recorder.close()
+        print("Video saved:", video_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--use_state", action = "store_true", help = "whether to use state loss")
     parser.add_argument("--use_tactile", action = "store_true", help = "whether to use tactile loss")
+    parser.add_argument("--output_root", default=str(DEFAULT_OUTPUT_ROOT), help="canonical output root")
+    parser.add_argument("--headless", action="store_true", help="disable GUI windows")
+    parser.add_argument("--record_video", dest="record_video", action="store_true", default=None, help="record a headless video")
+    parser.add_argument("--no_record_video", dest="record_video", action="store_false", help="disable video recording")
+    parser.add_argument("--video_fps", type=int, default=30)
+    parser.add_argument("--record_stride", type=int, default=None)
+    parser.add_argument("--run_name", default=None)
+    parser.add_argument("--smoke", action="store_true", help="use a short smoke-test configuration")
+    parser.add_argument("--num_sub_steps", type=int, default=None)
+    parser.add_argument("--num_total_steps", type=int, default=None)
+    parser.add_argument("--num_opt_steps", type=int, default=None)
 
     args = parser.parse_args()
     USE_STATE = args.use_state
